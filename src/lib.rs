@@ -3,6 +3,7 @@ pub mod log;
 
 pub mod audio;
 pub mod capture;
+pub mod icon;
 pub mod server;
 pub mod session;
 pub mod tunnel;

@@ -37,6 +37,18 @@ rustup default stable-x86_64-pc-windows-gnullvm
 .\target\x86_64-pc-windows-gnullvm\release\telinha.exe
 ```
 
+### Instalador (MSI)
+
+```powershell
+.\installer\build-msi.ps1     # gera telinha-<versão>-x64.msi na raiz
+```
+
+Precisa do WiX Toolset 3.14 (binários de github.com/wixtoolset/wix3 em `%LOCALAPPDATA%\wix314`)
+e do cloudflared instalado. O MSI instala em `C:\Program Files\telinha` o `telinha.exe`, o
+`telinha-cli.exe` e o `cloudflared.exe` (licença Apache-2.0, incluída), cria atalhos no Menu
+Iniciar e na Área de Trabalho e aparece em "Aplicativos instalados" para desinstalar. Instalar
+uma versão nova (suba `version` no `Cargo.toml`) substitui a anterior.
+
 Linha de comando: sem argumentos, abre menus no terminal. Direto:
 
 ```powershell

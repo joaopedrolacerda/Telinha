@@ -590,38 +590,9 @@ impl App {
     }
 }
 
-/// Ícone da janela: um monitor estilizado na cor de destaque, desenhado em código.
+/// Ícone da janela (o mesmo desenho embutido no .exe).
 fn app_icon() -> egui::IconData {
-    let n = 64usize;
-    let mut rgba = vec![0u8; n * n * 4];
-    let inside_round = |x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: f32| {
-        let cx = x.clamp(x0 + r, x1 - r);
-        let cy = y.clamp(y0 + r, y1 - r);
-        x >= x0 && x <= x1 && y >= y0 && y <= y1 && (x - cx).powi(2) + (y - cy).powi(2) <= r * r
-    };
-    for y in 0..n {
-        for x in 0..n {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let color = if inside_round(fx, fy, 6.0, 10.0, 58.0, 46.0, 7.0) {
-                if inside_round(fx, fy, 11.0, 15.0, 53.0, 41.0, 3.0) { [0x1e, 0x21, 0x2b, 255] } else { [0x63, 0x66, 0xf1, 255] }
-            } else if inside_round(fx, fy, 27.0, 46.0, 37.0, 53.0, 1.0) || inside_round(fx, fy, 18.0, 52.0, 46.0, 57.0, 2.5) {
-                [0x63, 0x66, 0xf1, 255]
-            } else {
-                [0, 0, 0, 0]
-            };
-            rgba[(y * n + x) * 4..][..4].copy_from_slice(&color);
-        }
-    }
-    // "play" no centro da tela
-    for y in 20..37 {
-        for x in 27..40 {
-            let (fx, fy) = (x as f32 - 27.0, y as f32 - 28.5);
-            if fy.abs() <= 8.5 - fx * 0.65 {
-                rgba[(y * n + x) * 4..][..4].copy_from_slice(&[0x22, 0xc5, 0x5e, 255]);
-            }
-        }
-    }
-    egui::IconData { rgba, width: n as u32, height: n as u32 }
+    egui::IconData { rgba: telinha::icon::draw_icon(64), width: 64, height: 64 }
 }
 
 impl eframe::App for App {
