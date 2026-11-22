@@ -1,0 +1,8 @@
+# Compila com LLVM-MinGW (clang + lld), sem precisar do Visual Studio.
+[build]
+target = "x86_64-pc-windows-gnullvm"
+
+[target.x86_64-pc-windows-gnullvm]
+linker = "x86_64-w64-mingw32-clang"
+# Linka libunwind/libc++ estaticamente: o .exe roda sem DLLs extras.
+rustflags = ["-C", "target-feature=+crt-static"]

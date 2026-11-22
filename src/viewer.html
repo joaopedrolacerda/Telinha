@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>telinha</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #000; color: #eee;
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { max-width: 100%; max-height: 100%; display: block; }
+  #bar { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+    display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-radius: 12px;
+    background: rgba(20,20,20,.8); backdrop-filter: blur(8px); transition: opacity .3s;
+    max-width: calc(100% - 32px); }
+  body.idle #bar { opacity: 0; }
+  button { background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 8px;
+    padding: 6px 12px; font: inherit; cursor: pointer; white-space: nowrap; }
+  button:hover { background: #383838; }
+  button.primary { background: #2563eb; border-color: #2563eb; }
+  #status { opacity: .75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: #888; margin-right: 6px; vertical-align: middle; }
+  #status.live .dot { background: #22c55e; }
+  #status.off .dot { background: #ef4444; }
+  #msg { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    text-align: center; padding: 16px; opacity: .7; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="screen"></canvas></div>
+<div id="msg">Conectando…</div>
+<div id="bar">
+  <span id="status"><span class="dot"></span><span id="statusText">conectando</span></span>
+  <button id="sound" class="primary" hidden>🔊 Ativar som</button>
+  <button id="full">⛶ Tela cheia</button>
+</div>
+<script>
+(() => {
+  const token = new URLSearchParams(location.search).get("t") || "";
+  const canvas = document.getElementById("screen");
+  const ctx2d = canvas.getContext("2d");
+  const msg = document.getElementById("msg");
+  const statusEl = document.getElementById("status");
+  const statusText = document.getElementById("statusText");
+  const soundBtn = document.getElementById("sound");
+
+  let audioCfg = null, audioCtx = null, nextTime = 0, muted = true;
+  let decoding = false, pendingFrame = null, frames = 0, ended = false;
+
+  function setStatus(cls, text) { statusEl.className = cls; statusText.textContent = text; }
+
+  // ---------- vídeo ----------
+  async function showFrame(buf) {
+    if (decoding) { pendingFrame = buf; return; }   // descarta quadros antigos
+    decoding = true;
+    try {
+      const bmp = await createImageBitmap(new Blob([buf], { type: "image/jpeg" }));
+      if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+        canvas.width = bmp.width; canvas.height = bmp.height;
+      }
+      ctx2d.drawImage(bmp, 0, 0);
+      bmp.close();
+      frames++;
+      msg.hidden = true;
+    } catch (e) { /* quadro corrompido: ignora */ }
+    decoding = false;
+    if (pendingFrame) { const f = pendingFrame; pendingFrame = null; showFrame(f); }
+  }
+
+  // ---------- áudio ----------
+  function enableSound() {
+    if (!audioCfg) return;
+    if (!audioCtx) {
+      try { audioCtx = new AudioContext({ sampleRate: audioCfg.sampleRate, latencyHint: "interactive" }); }
+      catch { audioCtx = new AudioContext(); }
+    }
+    audioCtx.resume();
+    muted = false;
+    soundBtn.textContent = "🔇 Mudo";
+    soundBtn.classList.remove("primary");
+  }
+  function toggleSound() {
+    if (muted) enableSound();
+    else { muted = true; soundBtn.textContent = "🔊 Ativar som"; soundBtn.classList.add("primary"); }
+  }
+  soundBtn.onclick = toggleSound;
+
+  function playAudio(buf) {
+    if (muted || !audioCtx || audioCtx.state !== "running") return;
+    const ch = audioCfg.channels;
+    const pcm = new Int16Array(buf);
+    const frameCount = Math.floor(pcm.length / ch);
+    if (!frameCount) return;
+    const ab = audioCtx.createBuffer(ch, frameCount, audioCfg.sampleRate);
+    for (let c = 0; c < ch; c++) {
+      const out = ab.getChannelData(c);
+      for (let i = 0; i < frameCount; i++) out[i] = pcm[i * ch + c] / 32768;
+    }
+    const now = audioCtx.currentTime;
+    // Mantém ~60ms de folga; se acumulou atraso demais, recomeça.
+    if (nextTime < now + 0.02 || nextTime > now + 0.4) nextTime = now + 0.06;
+    const src = audioCtx.createBufferSource();
+    src.buffer = ab;
+    src.connect(audioCtx.destination);
+    src.start(nextTime);
+    nextTime += ab.duration;
+  }
+
+  // ---------- conexão ----------
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => setStatus("live", "ao vivo");
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === "string") {
+        const hello = JSON.parse(ev.data);
+        document.title = `telinha — ${hello.name}`;
+        audioCfg = hello.audio;
+        soundBtn.hidden = !audioCfg;
+        setStatus("live", `ao vivo · ${hello.name}`);
+        return;
+      }
+      const tag = new Uint8Array(ev.data, 0, 1)[0];
+      const body = ev.data.slice(1);
+      if (tag === 1) showFrame(body);
+      else if (tag === 2) playAudio(body);
+    };
+    ws.onclose = () => {
+      setStatus("off", "desconectado");
+      if (frames === 0 && !ended) { msg.hidden = false; msg.textContent = "Não foi possível conectar. Tentando de novo…"; }
+      else { msg.hidden = false; msg.textContent = "A transmissão foi encerrada ou caiu. Tentando reconectar…"; }
+      setTimeout(connect, 2000);
+    };
+  }
+  connect();
+
+  // ---------- UI ----------
+  document.getElementById("full").onclick = () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen();
+  };
+  let idleTimer;
+  function wake() {
+    document.body.classList.remove("idle");
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => document.body.classList.add("idle"), 3000);
+  }
+  addEventListener("mousemove", wake);
+  addEventListener("touchstart", wake);
+  wake();
+})();
+</script>
+</body>
+</html>
