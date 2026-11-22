@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
+use telinha::audio::{self, AudioApp, AudioControl, AudioSource};
 use telinha::capture::{self, SourceSpec};
 use telinha::session::{Session, SessionConfig};
 
@@ -122,6 +123,11 @@ struct Settings {
     monitor_name: String,
     window_name: String,
     audio: bool,
+    audio_mode: AudioMode,
+    /// Aplicativos marcados no modo "Escolher aplicativos" (nome do .exe).
+    audio_apps: Vec<String>,
+    /// Volume da transmissão em % (0-200).
+    volume: u16,
     fps: u32,
     quality: u8,
     max_width: u32,
@@ -131,6 +137,16 @@ struct Settings {
     port: u16,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+enum AudioMode {
+    /// Tudo que toca no PC.
+    System,
+    /// Só o aplicativo compartilhado (na tela inteira, vira System).
+    SharedApp,
+    /// Os aplicativos marcados na lista.
+    Apps,
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -138,6 +154,9 @@ impl Default for Settings {
             monitor_name: String::new(),
             window_name: String::new(),
             audio: true,
+            audio_mode: AudioMode::SharedApp,
+            audio_apps: vec![],
+            volume: 100,
             fps: 60,
             quality: 60,
             max_width: 1280,
@@ -180,6 +199,8 @@ struct App {
     preview_at: Instant,
     copied_at: Option<Instant>,
     title_bar_done: bool,
+    audio_apps: Vec<AudioApp>,
+    audio_control: Arc<AudioControl>,
 }
 
 impl App {
@@ -200,9 +221,12 @@ impl App {
             ctx.request_repaint();
         });
 
+        let audio_control = AudioControl::new(s.volume as f32 / 100.0);
         let mut app = Self {
             rt: tokio::runtime::Runtime::new().expect("runtime tokio"),
             s,
+            audio_apps: vec![],
+            audio_control,
             monitors: vec![],
             windows: vec![],
             sel_monitor: 0,
@@ -223,6 +247,7 @@ impl App {
     fn refresh_sources(&mut self) {
         self.monitors = capture::list_monitors();
         self.windows = capture::list_windows();
+        self.audio_apps = audio::list_audio_apps();
         let find = |list: &[SourceSpec], name: &str| list.iter().position(|x| x.name == name).unwrap_or(0);
         self.sel_monitor = find(&self.monitors, &self.s.monitor_name);
         self.sel_window = find(&self.windows, &self.s.window_name);
@@ -242,9 +267,39 @@ impl App {
             return;
         };
         self.error = None;
+
+        let audio = if !self.s.audio {
+            None
+        } else {
+            match self.s.audio_mode {
+                AudioMode::System => Some(AudioSource::System),
+                AudioMode::SharedApp => match (self.s.share_window, source.pid) {
+                    (true, Some(pid)) => Some(AudioSource::Processes { pids: vec![pid], include_tree: true }),
+                    _ => Some(AudioSource::System),
+                },
+                AudioMode::Apps => {
+                    self.audio_apps = audio::list_audio_apps(); // processos atuais
+                    let pids: Vec<u32> = self
+                        .audio_apps
+                        .iter()
+                        .filter(|a| self.s.audio_apps.iter().any(|n| n.eq_ignore_ascii_case(&a.name)))
+                        .flat_map(|a| a.pids.iter().copied())
+                        .collect();
+                    if pids.is_empty() {
+                        self.error = Some(
+                            "Marque pelo menos um aplicativo com som aberto (ou escolha outro modo de som).".into(),
+                        );
+                        return;
+                    }
+                    Some(AudioSource::Processes { pids, include_tree: false })
+                }
+            }
+        };
+
         let cfg = SessionConfig {
             source,
-            audio: self.s.audio,
+            audio,
+            audio_control: self.audio_control.clone(),
             fps: self.s.fps,
             quality: self.s.quality,
             max_width: self.s.max_width,
@@ -375,10 +430,85 @@ impl App {
         });
     }
 
-    fn audio_card(&mut self, ui: &mut egui::Ui) {
+    /// `idle`: dá para mudar a origem do som. O volume e o mudo funcionam sempre, inclusive ao vivo.
+    fn audio_card(&mut self, ui: &mut egui::Ui, idle: bool) {
+        let live_audio = matches!(&self.state, State::Running { session, .. } if session.audio_info.is_some());
         card(ui, "Som", |ui| {
-            ui.checkbox(&mut self.s.audio, "Transmitir o som do PC");
-            ui.label(muted("Tudo que toca nas caixas/fone. Quem assiste clica em “Ativar som”."));
+            ui.add_enabled_ui(idle, |ui| {
+                ui.checkbox(&mut self.s.audio, "Transmitir som");
+                if !self.s.audio {
+                    return;
+                }
+                ui.radio_value(&mut self.s.audio_mode, AudioMode::System, "Todo o som do PC");
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut self.s.audio_mode, AudioMode::SharedApp, "Só o som do aplicativo compartilhado");
+                });
+                if self.s.audio_mode == AudioMode::SharedApp && !self.s.share_window {
+                    ui.indent("sharedapp", |ui| {
+                        ui.label(muted("Compartilhando a tela inteira: vai todo o som do PC."));
+                    });
+                }
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut self.s.audio_mode, AudioMode::Apps, "Escolher aplicativos");
+                    if self.s.audio_mode == AudioMode::Apps {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("⟳").on_hover_text("Atualizar lista de aplicativos com som").clicked() {
+                                self.audio_apps = audio::list_audio_apps();
+                            }
+                        });
+                    }
+                });
+                if self.s.audio_mode == AudioMode::Apps {
+                    egui::Frame::new().fill(FIELD).corner_radius(8).inner_margin(10).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        if self.audio_apps.is_empty() {
+                            ui.label(muted("Nenhum aplicativo com som aberto. Toque algo e clique em ⟳."));
+                        }
+                        for app in &self.audio_apps {
+                            let mut on = self.s.audio_apps.iter().any(|n| n.eq_ignore_ascii_case(&app.name));
+                            ui.horizontal(|ui| {
+                                if ui.checkbox(&mut on, &app.name).changed() {
+                                    self.s.audio_apps.retain(|n| !n.eq_ignore_ascii_case(&app.name));
+                                    if on {
+                                        self.s.audio_apps.push(app.name.clone());
+                                    }
+                                }
+                                if app.playing {
+                                    ui.label(RichText::new("● tocando").color(LIVE).size(12.0));
+                                }
+                            });
+                        }
+                    });
+                }
+            });
+
+            if !self.s.audio {
+                return;
+            }
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                let muted_now = self.audio_control.muted();
+                let (icon, tip) = if muted_now { ("🔇", "Ativar o som") } else { ("🔊", "Silenciar a transmissão") };
+                if ui.add(egui::Button::new(RichText::new(icon).size(16.0)).min_size(Vec2::new(36.0, 30.0))).on_hover_text(tip).clicked() {
+                    self.audio_control.set_muted(!muted_now);
+                }
+                ui.label("Volume");
+                if ui.add(egui::Slider::new(&mut self.s.volume, 0..=200).suffix("%")).changed() {
+                    self.audio_control.set_gain(self.s.volume as f32 / 100.0);
+                }
+            });
+            if live_audio {
+                let peak = self.audio_control.take_peak();
+                let color = if self.audio_control.muted() {
+                    MUTED
+                } else if peak >= 0.99 {
+                    DANGER // estourando: abaixe o volume
+                } else {
+                    LIVE
+                };
+                ui.add(egui::ProgressBar::new(peak.sqrt()).desired_height(6.0).fill(color));
+            }
+            ui.label(muted("O volume vale para quem assiste e pode ser mudado ao vivo."));
         });
     }
 
@@ -546,9 +676,9 @@ impl App {
         self.live_card(ui);
 
         let idle = matches!(self.state, State::Idle);
+        ui.add_enabled_ui(idle, |ui| self.source_card(ui));
+        self.audio_card(ui, idle); // volume fica ativo ao vivo
         ui.add_enabled_ui(idle, |ui| {
-            self.source_card(ui);
-            self.audio_card(ui);
             self.video_card(ui);
             self.link_card(ui);
         });
@@ -606,7 +736,7 @@ impl eframe::App for App {
         self.poll();
         self.update_preview(&ctx);
         if !matches!(self.state, State::Idle) {
-            ctx.request_repaint_after(Duration::from_millis(200));
+            ctx.request_repaint_after(Duration::from_millis(80)); // medidor de som fluido
         }
 
         egui::CentralPanel::default()

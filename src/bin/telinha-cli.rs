@@ -3,6 +3,7 @@ use anyhow::Result;
 use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, Confirm};
 use std::time::Duration;
+use telinha::audio::{self, AudioControl, AudioSource};
 use telinha::capture;
 use telinha::session::{Session, SessionConfig};
 
@@ -51,6 +52,22 @@ struct Args {
     #[arg(long)]
     no_audio: bool,
 
+    /// Com --app: transmitir só o som do aplicativo compartilhado
+    #[arg(long, requires = "app", conflicts_with_all = ["no_audio", "audio_from"])]
+    app_audio: bool,
+
+    /// Transmitir só o som destes aplicativos (nome do .exe, ex.: chrome.exe). Pode repetir.
+    #[arg(long, value_name = "EXE", conflicts_with = "no_audio")]
+    audio_from: Vec<String>,
+
+    /// Volume da transmissão em % (0-200)
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(0..=200))]
+    volume: u16,
+
+    /// Lista os aplicativos com áudio aberto e sai
+    #[arg(long)]
+    list_audio_apps: bool,
+
     /// Caminho do executável do cloudflared
     #[arg(long, default_value = "cloudflared")]
     cloudflared: String,
@@ -58,19 +75,44 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.list_audio_apps {
+        for app in audio::list_audio_apps() {
+            println!("{}{}", app.name, if app.playing { "  (tocando)" } else { "" });
+        }
+        return Ok(());
+    }
     println!("\n=== telinha — compartilhamento de tela ===\n");
 
     let source = match capture::source_from_args(args.screen, args.app.as_deref())? {
         Some(s) => s,
         None => capture::choose_source()?,
     };
-    let audio = if args.audio || args.no_audio {
-        args.audio
-    } else {
-        Confirm::with_theme(&ColorfulTheme::default())
+
+    let audio = if args.no_audio {
+        None
+    } else if !args.audio_from.is_empty() {
+        let apps = audio::list_audio_apps();
+        let mut pids = Vec::new();
+        for want in &args.audio_from {
+            match apps.iter().find(|a| a.name.eq_ignore_ascii_case(want)) {
+                Some(a) => pids.extend(&a.pids),
+                None => anyhow::bail!("\"{want}\" não tem áudio aberto agora (veja --list-audio-apps)"),
+            }
+        }
+        Some(AudioSource::Processes { pids, include_tree: false })
+    } else if args.app_audio {
+        let pid = source.pid.ok_or_else(|| anyhow::anyhow!("não achei o processo da janela"))?;
+        Some(AudioSource::Processes { pids: vec![pid], include_tree: true })
+    } else if args.audio
+        || Confirm::with_theme(&ColorfulTheme::default())
             .with_prompt("Compartilhar o som do PC também?")
             .default(true)
             .interact()?
+    {
+        Some(AudioSource::System)
+    } else {
+        None
     };
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -78,6 +120,7 @@ fn main() -> Result<()> {
         SessionConfig {
             source,
             audio,
+            audio_control: AudioControl::new(args.volume as f32 / 100.0),
             fps: args.fps,
             quality: args.quality,
             max_width: args.max_width,

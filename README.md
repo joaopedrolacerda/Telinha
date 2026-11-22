@@ -69,7 +69,11 @@ Opções do `telinha-cli`:
 | `--no-tunnel` | — | só local, sem Cloudflare (para testar) |
 | `--screen N` | — | compartilha a tela N sem menu |
 | `--app TEXTO` | — | compartilha a janela cujo nome/título contém TEXTO |
-| `--audio` / `--no-audio` | — | com ou sem som, sem perguntar |
+| `--audio` / `--no-audio` | — | com ou sem som (todo o som do PC), sem perguntar |
+| `--app-audio` | — | com `--app`: só o som do aplicativo compartilhado |
+| `--audio-from EXE` | — | só o som destes apps (repita para vários), ex.: `--audio-from chrome.exe` |
+| `--list-audio-apps` | — | lista os apps com áudio aberto e sai |
+| `--volume` | 100 | volume da transmissão em % (0–200) |
 | `--cloudflared` | `cloudflared` | caminho do executável |
 
 ## Como funciona
@@ -85,13 +89,19 @@ Opções do `telinha-cli`:
   Medido aqui: tela 2560x1440 @120Hz → 60 fps estáveis, inclusive pelo link do Cloudflare.
 - **Diagnóstico**: `$env:TELINHA_DEBUG=1` imprime por segundo quantos quadros chegam, entram
   na fila e são descartados.
-- **Som**: `cpal` em loopback WASAPI (tudo que toca na saída padrão do PC), PCM 16-bit em pacotes de 20 ms.
+- **Som**: três modos — todo o PC (`cpal`, loopback WASAPI da saída padrão), só o app
+  compartilhado, ou apps escolhidos de uma lista (os que aparecem no Mixer de Volume). Os dois
+  últimos usam o loopback por processo do Windows (10 versão 2004+, crate `wasapi`): uma captura
+  por app, misturadas a cada 20 ms com um pequeno buffer contra estalos. Volume (0–200%), mudo e
+  medidor de nível ajustáveis ao vivo. Sai em PCM 16-bit, pacotes de 20 ms.
 - **Segurança**: o link leva um token aleatório (`?t=...`); sem ele o servidor responde 403.
   O servidor só escuta em `127.0.0.1`, então só é alcançável pelo túnel.
 
 ## Limitações
 
-- O som é do PC inteiro, não só do aplicativo escolhido.
+- Som por aplicativo precisa do Windows 10 versão 2004 (build 19041) ou mais novo. Um app que
+  só começa a tocar som depois de iniciada a transmissão (num processo novo) não entra no modo
+  "Escolher aplicativos"; pare e inicie de novo.
 - Janelas minimizadas não são capturadas. No Windows 10 aparece uma borda amarela em volta
   do que está sendo capturado (só na sua tela; tirar a borda só é possível no Windows 11).
 - A captura só gera quadro quando a imagem muda: tela parada = poucos quadros (e pouca banda).

@@ -43,6 +43,8 @@ pub struct SourceSpec {
     pub name: String,
     /// Largura em pixels (para estimativas na interface).
     pub width: u32,
+    /// Processo dono da janela (para capturar só o som desse aplicativo).
+    pub pid: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -109,6 +111,7 @@ fn monitor_spec(i: usize, m: &Monitor) -> SourceSpec {
         handle: m.as_raw_hmonitor() as usize,
         name: monitor_label(i, m),
         width: m.width().unwrap_or(1920),
+        pid: None,
     }
 }
 
@@ -118,6 +121,7 @@ fn window_spec(w: &Window) -> SourceSpec {
         handle: w.as_raw_hwnd() as usize,
         name: window_label(w),
         width: w.width().unwrap_or(1280).max(0) as u32,
+        pid: w.process_id().ok(),
     }
 }
 

@@ -1,6 +1,6 @@
 //! Uma sessão de compartilhamento: captura + som + servidor + túnel.
 //! `Session::start` liga tudo; soltar (`drop`) a sessão desliga tudo e derruba o link.
-use crate::audio::{self, AudioHandle, AudioInfo};
+use crate::audio::{self, AudioControl, AudioHandle, AudioInfo, AudioSource};
 use crate::capture::{self, CaptureHandle, FrameCache, SourceSpec};
 use crate::server::{self, AppState};
 use crate::tunnel::{self, Tunnel};
@@ -15,7 +15,10 @@ use tokio::sync::{broadcast, watch};
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
     pub source: SourceSpec,
-    pub audio: bool,
+    /// `None` = sem som.
+    pub audio: Option<AudioSource>,
+    /// Volume/mudo/medidor, ajustáveis ao vivo.
+    pub audio_control: Arc<AudioControl>,
     pub fps: u32,
     pub quality: u8,
     pub max_width: u32,
@@ -29,6 +32,7 @@ pub struct Session {
     pub local_url: String,
     pub public_url: Option<String>,
     pub audio_info: Option<AudioInfo>,
+    pub audio_control: Arc<AudioControl>,
     pub viewers: Arc<AtomicUsize>,
     pub last_frame: FrameCache,
     capture: Option<CaptureHandle>,
@@ -57,6 +61,7 @@ impl Session {
             local_url: String::new(),
             public_url: None,
             audio_info: None,
+            audio_control: cfg.audio_control.clone(),
             viewers: Arc::new(AtomicUsize::new(0)),
             last_frame: last_frame.clone(),
             capture: None,
@@ -78,10 +83,19 @@ impl Session {
         )?);
         logln!("Compartilhando: {}", cfg.source.name);
 
-        if cfg.audio {
-            match audio::start_loopback(audio_tx.clone()) {
+        if let Some(source) = cfg.audio.clone() {
+            let what = match &source {
+                AudioSource::System => "todo o som do PC".to_string(),
+                AudioSource::Processes { pids, .. } => {
+                    let mut names: Vec<String> = pids.iter().filter_map(|p| audio::process_name(*p)).collect();
+                    names.sort();
+                    names.dedup();
+                    names.join(", ")
+                }
+            };
+            match audio::start(source, audio_tx.clone(), cfg.audio_control.clone()) {
                 Ok((info, handle)) => {
-                    logln!("Som: {} Hz, {} canal(is)", info.sample_rate, info.channels);
+                    logln!("Som ({what}): {} Hz, {} canal(is)", info.sample_rate, info.channels);
                     session.audio_info = Some(info);
                     session.audio = Some(handle);
                 }
